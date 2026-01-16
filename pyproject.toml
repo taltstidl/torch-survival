@@ -1,0 +1,40 @@
+[project]
+name = "torch-survival"
+version = "0.1.0-alpha.1"
+description = "Deep survival analysis made easy"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "optuna>=4.5.0",
+    "optuna-integration[sklearn]>=4.6.0",
+    "rich>=14.2.0",
+    "scikit-survival>=0.24.1",
+    "torch>=2.8.0",
+    "typing-extensions>=4.15.0",
+]
+
+[project.optional-dependencies]
+docs = [
+    "furo>=2025.7.19",
+    "sphinx>=8.2.3",
+]
+test = [
+    "h5py>=3.14.0",
+    "pycox>=0.3.0",
+    "torchsurv>=0.1.5",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[build-system]
+requires = ["uv_build>=0.8.11,<0.9.0"]
+build-backend = "uv_build"
