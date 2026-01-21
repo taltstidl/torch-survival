@@ -155,6 +155,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
             study.optimize(objective, n_trials=50, callbacks=[callback])
 
         # Train model
+        self.optuna_params_ = study.best_params
         self.model_ = self._train(study.best_trial, X, y_event, y_time)
 
         return self
@@ -182,3 +183,6 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         pmf = self.model_.predict_pmf(X)
         times = pmf @ self.y_time_trans_.cuts
         return times
+
+    def get_optuna_params(self):
+        return self.optuna_params_
