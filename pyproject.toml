@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "optuna>=4.5.0",
     "optuna-integration[sklearn]>=4.6.0",
+    "pycox>=0.3.0",
     "rich>=14.2.0",
     "scikit-survival>=0.24.1",
     "torch>=2.8.0",
@@ -21,7 +22,6 @@ docs = [
 ]
 test = [
     "h5py>=3.14.0",
-    "pycox>=0.3.0",
     "torchsurv>=0.1.5",
 ]
 

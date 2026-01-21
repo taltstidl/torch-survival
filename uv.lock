@@ -2184,12 +2184,13 @@ wheels = [
 
 [[package]]
 name = "torch-survival"
-version = "0.1.0"
+version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },
     { name = "optuna" },
     { name = "optuna-integration", extra = ["sklearn"] },
+    { name = "pycox" },
     { name = "rich" },
     { name = "scikit-survival" },
     { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
@@ -2204,7 +2205,6 @@ docs = [
 ]
 test = [
     { name = "h5py" },
-    { name = "pycox" },
     { name = "torchsurv" },
 ]
 
@@ -2215,7 +2215,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "optuna", specifier = ">=4.5.0" },
     { name = "optuna-integration", extras = ["sklearn"], specifier = ">=4.6.0" },
-    { name = "pycox", marker = "extra == 'test'", specifier = ">=0.3.0" },
+    { name = "pycox", specifier = ">=0.3.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "scikit-survival", specifier = ">=0.24.1" },
     { name = "sphinx", marker = "extra == 'docs'", specifier = ">=8.2.3" },

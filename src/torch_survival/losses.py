@@ -205,19 +205,15 @@ def discrete_with_pairwise_rank(estimate: torch.Tensor, event: torch.Tensor, tim
         torch.tensor(-100, device=estimate.device))  # -100 is also used in PyTorch's binary cross entropy as a cut-off
     loss1 = (- torch.sum(event * torch.log(torch.clamp(estimate_t, min=eps)), dim=-1)
              - torch.sum(~event * torch.log(torch.clamp(1 - cum_incidence_t, min=eps)), dim=-1))
-    # print(loss1)
-    if torch.isnan(loss1):
-        pass
 
     # Here, we add extra dimensions to enable pairwise comparisons of (i,j)
     event_i, event_j = event.unsqueeze(-2), event.unsqueeze(-1)
     time_i, time_j = time.unsqueeze(-2), time.unsqueeze(-1)
     # The acceptability matrix specifies which (i, j) can be compared
-    acc = event_i & event_j & (time_i < time_j)
+    acc = event_i & (time_i < time_j)
 
     cum_incidence_ti = cum_incidence_t.unsqueeze(-2)
     cum_incidence_tij = cum_incidence[:, time]
     loss2 = torch.sum(torch.exp(-(cum_incidence_ti - cum_incidence_tij) / sigma) * acc, dim=(-2, -1))
 
-    # print(loss1.item(), loss2.item())
     return loss1 + alpha * loss2
