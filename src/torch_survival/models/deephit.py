@@ -67,6 +67,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
 
     #: Default hyperparameter search space
     default_search_space: DeepHitSearchSpace = {
+        'n_times': (10, 500),
         'alpha': (0, 1),
         'sigma': (1e-3, 1e1),
     }
@@ -85,7 +86,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         # Do 5-fold cross validation
         scores = []
         for train_idx, test_idx in StratifiedKFold(n_splits=5).split(X, y_event):
-            model = self._train(trial, X[train_idx], y_event[train_idx], y_time[train_idx])
+            model, _ = self._train(trial, X[train_idx], y_event[train_idx], y_time[train_idx])
             surv = model.predict_surv_df(X[test_idx])
             c_index = EvalSurv(surv, y_time[test_idx], y_event[test_idx], censor_surv='km').concordance_td('antolini')
             scores.append(c_index)
@@ -94,11 +95,18 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
     def _train(self, trial: optuna.Trial, X, y_event, y_time):
         n_inputs, n_outputs = X.shape[-1], 1
 
+        # Discretize event times
+        n_times = self.search_space['n_times']
+        if not isinstance(n_times, int):
+            n_times = trial.suggest_int('n_times', *n_times)
+        y_trans = LabTransDiscreteTime(n_times)
+        y = y_trans.fit_transform(y_time, y_event)
+
         # Split into training and validation for early stopping
-        X_train, X_val, y_event_train, y_event_val, y_time_train, y_time_val = \
-            train_test_split(X, y_event, y_time, test_size=0.2, stratify=y_event, random_state=self.random_state)
-        y_train = self.y_time_trans_.fit_transform(y_time_train, y_event_train)
-        y_val = self.y_time_trans_.transform(y_time_val, y_event_val)
+        X_train, X_val, y_time_train, y_time_val, y_event_train, y_event_val = \
+            train_test_split(X, *y, test_size=0.2, stratify=y_event, random_state=self.random_state)
+        y_train = (y_time_train, y_event_train)
+        y_val = (y_time_val, y_event_val)
 
         # Sample loss parameters
         alpha = self.search_space['alpha']
@@ -109,12 +117,13 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
             sigma = trial.suggest_float('sigma', *sigma, log=True)
 
         # Train and return model
-        net = DeepHitNetwork(n_inputs, self.y_time_trans_.out_features)
-        model = DeepHitSingle(net, tt.optim.Adam(lr=1e-4), duration_index=self.y_time_trans_.cuts,
+        net = DeepHitNetwork(n_inputs, y_trans.out_features)
+        model = DeepHitSingle(net, tt.optim.Adam(lr=1e-4), duration_index=y_trans.cuts,
                               alpha=alpha, sigma=sigma, device=self.device)
         callbacks = [tt.callbacks.EarlyStopping(patience=10)]
-        model.fit(X_train, y_train, batch_size=50, epochs=100, callbacks=callbacks, val_data=(X_val, y_val), verbose=False)
-        return model
+        model.fit(X_train, y_train, batch_size=50, epochs=100, callbacks=callbacks,
+                  val_data=(X_val, y_val), verbose=False)
+        return model, y_trans.cuts
 
     def fit(self, X, y):
         """ Fit the model to the given survival data.
@@ -137,11 +146,6 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         X = X.astype(np.float32)
         y_event, y_time = check_array_survival(X, y)
 
-        # Discretize event times
-        y_time_max = y_time.max().item()
-        n_times = 500 if y_time_max >= 499.5 else int(round(y_time_max)) + 1
-        self.y_time_trans_ = LabTransDiscreteTime(n_times)
-
         # Seed PyTorch random number generator
         if self.random_state:
             torch.manual_seed(self.random_state)
@@ -156,7 +160,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
 
         # Train model
         self.optuna_params_ = study.best_params
-        self.model_ = self._train(study.best_trial, X, y_event, y_time)
+        self.model_, self.disc_times_ = self._train(study.best_trial, X, y_event, y_time)
 
         return self
 
@@ -181,7 +185,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         X = validate_data(self, X)
         X = X.astype(np.float32)
         pmf = self.model_.predict_pmf(X)
-        times = pmf @ self.y_time_trans_.cuts
+        times = pmf @ self.disc_times_
         return times
 
     def get_optuna_params(self):
