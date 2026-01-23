@@ -25,20 +25,22 @@ from torch_survival.utils import merge_configs
 class DeepHitNetwork(nn.Module):
     def __init__(self, n_inputs, n_times):
         super().__init__()
+        n_inputs_min = min(n_inputs, 100)
+        print(n_inputs, n_inputs_min)
         self.shared_network = nn.Sequential(
-            nn.Linear(n_inputs, 3 * n_inputs),
+            nn.Linear(n_inputs, 3 * n_inputs_min),
             nn.ReLU(),
             nn.Dropout(p=0.6),
         )
         self.cause_network = nn.Sequential(
             # input consists of shared network output + features
-            nn.Linear(4 * n_inputs, 5 * n_inputs),
+            nn.Linear(3 * n_inputs_min + n_inputs, 5 * n_inputs_min),
             nn.ReLU(),
             nn.Dropout(p=0.6),
-            nn.Linear(5 * n_inputs, 3 * n_inputs),
+            nn.Linear(5 * n_inputs_min, 3 * n_inputs_min),
             nn.ReLU(),
             nn.Dropout(p=0.6),
-            nn.Linear(3 * n_inputs, n_times),
+            nn.Linear(3 * n_inputs_min, n_times),
         )
 
     def forward(self, x):
