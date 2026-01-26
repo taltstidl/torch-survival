@@ -26,7 +26,8 @@ class DeepHitNetwork(nn.Module):
     def __init__(self, n_inputs, n_times):
         super().__init__()
         n_inputs_min = min(n_inputs, 100)
-        print(n_inputs, n_inputs_min)
+        if n_inputs > 10_000:
+            n_inputs_min = 50  # Guard against wide datasets
         self.shared_network = nn.Sequential(
             nn.Linear(n_inputs, 3 * n_inputs_min),
             nn.ReLU(),
@@ -50,6 +51,8 @@ class DeepHitNetwork(nn.Module):
 
 
 class DeepHitSearchSpace(TypedDict):
+    #: Number of time points to use for discretization
+    n_times: tuple[int, int] | int
     #: Weight for the ranking loss component
     alpha: tuple[float, float] | float
     #: Bandwidth of the radial basis function in the ranking loss component
@@ -74,11 +77,12 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         'sigma': (1e-3, 1e1),
     }
 
-    def __init__(self, search_space: DeepHitSearchSpace | None = None, n_epochs=100, random_state=None, device=None):
+    def __init__(self, search_space: DeepHitSearchSpace | None = None, n_epochs=100, batch_size=50, random_state=None, device=None):
         self.search_space = deepcopy(self.default_search_space)
         if search_space:
             self.search_space = merge_configs(self.search_space, search_space)
         self.n_epochs = n_epochs
+        self.batch_size = batch_size
         self.random_state = random_state
         self.device = device
         if self.device is None:
@@ -123,7 +127,7 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         model = DeepHitSingle(net, tt.optim.Adam(lr=1e-4), duration_index=y_trans.cuts,
                               alpha=alpha, sigma=sigma, device=self.device)
         callbacks = [tt.callbacks.EarlyStopping(patience=10)]
-        model.fit(X_train, y_train, batch_size=50, epochs=100, callbacks=callbacks,
+        model.fit(X_train, y_train, batch_size=self.batch_size, epochs=self.n_epochs, callbacks=callbacks,
                   val_data=(X_val, y_val), verbose=False)
         return model, y_trans.cuts
 
