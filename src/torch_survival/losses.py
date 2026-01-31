@@ -32,8 +32,7 @@ def cox_neg_log_likelihood(risk: torch.Tensor, event: torch.Tensor, time: torch.
     return - likelihood.sum(dim=-1) / event.sum(dim=-1)
 
 
-def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: torch.Tensor,
-                               activations: bool = False) -> torch.Tensor:
+def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
     """ Weibull negative log likelihood.
     From DeepWeiSurv: https://doi.org/10.1007/978-3-030-47426-3_53
 
@@ -47,9 +46,6 @@ def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: 
 
     time: torch.Tensor, of shape (..., n_samples)
         Time of either observed event or dropout
-
-    activations: bool
-        Whether to apply ELU activations
     """
     # Extract mixture alpha, shape, and scale from params
     if params.shape[-1] == 2 or params.shape[-1] == 3:
@@ -61,11 +57,6 @@ def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: 
         time = time.unsqueeze(-1)  # for proper broadcasting with mixture params
     else:
         raise ValueError('Unexpected number of Weibull parameters: ' + str(params.shape[-1]))
-
-    # Apply ELU activations if requested
-    if activations:
-        shape = torch.nn.functional.elu(shape) + 2
-        scale = torch.nn.functional.elu(scale) + 1 + 1e-5
 
     # Guard against time=0, where log(time) = -inf, since a * event_true = nan which is later disregarded in nansum
     event_true = event & (time.squeeze(-1) != 0)
@@ -116,7 +107,7 @@ def weibull_neg_log_likelihood_original(params: torch.Tensor, event: torch.Tenso
                        + (~event) * torch.log(torch.sum(alphas * h1, 0)))
 
 
-def weibull_survival_time(params: torch.Tensor, activations: bool = False):
+def weibull_survival_time(params: torch.Tensor, softmax: bool = True):
     """ Survival time from mean of mixture of Weibull distributions.
     From DeepWeiSurv: https://doi.org/10.1007/978-3-030-47426-3_53
 
@@ -125,8 +116,8 @@ def weibull_survival_time(params: torch.Tensor, activations: bool = False):
     params: torch.Tensor, of shape (..., n_samples, 2 | p * 3)
         Parameters of the mixture of p Weibull distributions, namely weights, shapes, and scales
 
-    activations: bool
-        Whether to apply ELU activations
+    softmax: bool
+        Whether to apply a softmax transformation on the weights
     """
     # Extract mixture alpha, shape, and scale from params
     if params.shape[-1] == 2 or params.shape[-1] == 3:
@@ -139,13 +130,8 @@ def weibull_survival_time(params: torch.Tensor, activations: bool = False):
         raise ValueError('Unexpected number of Weibull parameters: ' + str(params.shape[-1]))
 
     # Apply softmax if needed
-    if activations and n_dists > 1:
+    if softmax and n_dists > 1:
         weight = torch.softmax(weight, dim=-1)
-
-    # Apply ELU activations if requested
-    if activations:
-        shape = torch.nn.functional.elu(shape) + 2
-        scale = torch.nn.functional.elu(scale) + 1 + 1e-5
 
     # Return weighted mean as survival time estimate
     return torch.sum(weight * scale * torch.exp(torch.lgamma(1 + 1 / shape)), dim=-1)
