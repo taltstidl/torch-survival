@@ -66,7 +66,7 @@ def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: 
         time = time.unsqueeze(-1)  # for proper broadcasting with mixture params
 
     a = torch.log(shape) - torch.log(scale) + (shape - 1) * (torch.log(time) - torch.log(scale))
-    b = -torch.pow(time / scale, shape)
+    b = -torch.pow(torch.clamp(time / scale, max=1000), shape)
     if n_dists == 1:
         # Simplified equation for single distribution
         return -(torch.nansum(a * event_true.float(), dim=-1) + torch.sum(b, dim=-1)) / event.shape[-1]
