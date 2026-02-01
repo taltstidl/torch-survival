@@ -242,7 +242,7 @@ class DeepWeiSurv(WeibullBase):
        http://dx.doi.org/10.1007/978-3-030-47426-3_53
     """
 
-    def __init__(self, n_dists=2, n_epochs=500, random_state=None, device=None):
+    def __init__(self, n_dists=2, n_epochs=1000, random_state=None, device=None):
         super().__init__(n_dists=n_dists, n_epochs=n_epochs, device=device, sparse=False, original=False,
                          random_state=random_state)
 
@@ -257,6 +257,6 @@ class DPWTE(WeibullBase):
     .. [1]
     """
 
-    def __init__(self, n_dists_max=10, lamb=1e-4, n_epochs=500, random_state=None, device=None):
+    def __init__(self, n_dists_max=10, lamb=1e-4, n_epochs=1000, random_state=None, device=None):
         super().__init__(n_dists=n_dists_max, n_epochs=n_epochs, lamb=lamb, device=device, sparse=True, original=True,
                          random_state=random_state)

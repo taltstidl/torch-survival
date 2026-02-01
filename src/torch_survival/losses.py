@@ -54,13 +54,16 @@ def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: 
     elif params.shape[-1] % 3 == 0:
         n_dists = params.shape[-1] // 3
         weight, shape, scale = params[..., 0:n_dists], params[..., n_dists:2 * n_dists], params[..., 2 * n_dists:]
-        time = time.unsqueeze(-1)  # for proper broadcasting with mixture params
     else:
         raise ValueError('Unexpected number of Weibull parameters: ' + str(params.shape[-1]))
 
     # Guard against time=0, where log(time) = -inf, since a * event_true = nan which is later disregarded in nansum
-    event_true = event & (time.squeeze(-1) != 0)
+    event_true = event & (time != 0)
     event_false = ~event
+    time = torch.clamp(time, min=1e-4)
+
+    if n_dists > 1:
+        time = time.unsqueeze(-1)  # for proper broadcasting with mixture params
 
     a = torch.log(shape) - torch.log(scale) + (shape - 1) * (torch.log(time) - torch.log(scale))
     b = -torch.pow(time / scale, shape)
