@@ -55,3 +55,37 @@ def concordance_index(estimate: torch.Tensor, event: torch.Tensor, time: torch.T
     time_comp = time.unsqueeze(-1) > time.unsqueeze(-2)
     event = event.unsqueeze(-2)
     return torch.sum(estimate_comp & time_comp & event, (-2, -1)) / torch.sum(time_comp & event, (-2, -1))
+
+
+def c_index_antolini(survival: torch.Tensor, event: torch.Tensor, time: torch.Tensor,
+                     time_idx: torch.Tensor) -> torch.Tensor:
+    r""" Compute Antolini's concordance index or C-index.
+
+    Parameters
+    ----------
+    survival: torch.Tensor, of shape (..., n_samples, n_times)
+        Survival probabilities over discrete times estimated by model
+
+    event: torch.Tensor, of shape (..., n_samples)
+        Event indicator denoting whether time is of observed event or dropout
+
+    time: torch.Tensor, of shape (..., n_samples)
+        Time of either observed event or dropout
+
+    time_idx: torch.Tensor, of shape (..., n_samples)
+        Discrete time indices of either observed event or dropout
+
+    Returns
+    -------
+    torch.Tensor, of shape (...,)
+        Concordance index score
+    """
+    # Note: i = .unsqueeze(-2), j = .unsqueeze(-1)
+    comp = event.unsqueeze(-2) & ((time.unsqueeze(-2) < time.unsqueeze(-1)) | (
+            (time.unsqueeze(-2) == time.unsqueeze(-1)) & ~event.unsqueeze(-1)))
+
+    survival_i = survival.take_along_dim(time_idx.unsqueeze(-1), dim=-1).transpose(-1, -2)
+    survival_j = survival.take_along_dim(time_idx.unsqueeze(-2), dim=-1)
+    conc = (survival_i < survival_j) & comp
+
+    return conc.sum(dim=(-2, -1)) / comp.sum(dim=(-2, -1))
