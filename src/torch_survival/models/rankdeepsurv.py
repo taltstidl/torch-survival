@@ -5,11 +5,12 @@ import optuna
 import torch
 from optuna.samplers import TPESampler
 from sklearn.base import BaseEstimator
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.utils.validation import check_is_fitted, validate_data
 from sksurv.base import SurvivalAnalysisMixin
 from sksurv.util import check_array_survival
 
+from torch_survival.earlystop import EarlyStopper
 from torch_survival.metrics import concordance_index
 from torch_survival.progress import OptunaProgressCallback
 from torch_survival.sample import OptunaSampler, TunedTopology, TunedCategorical, TunedFloat
@@ -49,18 +50,18 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         Dropout probability for the hidden layer.
     optimizer: {'sgd', 'adam'} or TunedCategorical, default=TunedCategorical(choices=['sgd', 'adam'])
         Optimizer used for weight optimization.
-    learning_rate: float or TunedFloat, default=TunedFloat(low=1e-7, high=1e-3, log=True)
+    learning_rate: float or TunedFloat, default=TunedFloat(low=1e-5, high=1e-2, log=True)
         Initial learning rate used when optimizing weights.
     momentum: float or TunedFloat, default=TunedFloat(low=0.8, high=0.95)
         Momentum or first moment vector
     scheduler: {'inverse_time'} or TunedCategorical, default='inverse_time'
         Scheduler used for weight updates.
-    decay: float or TunedFloat, default=TunedFloat(low=0.0, high=0.001)
+    decay: float or TunedFloat, default=0.0
         Decay used by scheduler when updating learning rate.
     alpha: float or TunedFloat, default=TunedFloat(low=0.0, high=1.0)
         Weight term for regression and ranking loss, with :math:`\mathcal{L}=\alpha \mathcal{L}_{mse} + (1-\alpha)
         \mathcal{L}_{rank}`.
-    batch_size: int or TunedInt, default=128
+    batch_size: int or TunedInt, default=256
         Size of minibatches, here the number of pairs as training iterates over pairs of compatible samples.
     n_epochs: int, default=500
         Number of training epochs (how many times each pair of compatible samples will be used).
@@ -72,6 +73,7 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
     device: str or torch.device, default=None
         Device on which tensors will be allocated. If None, uses CUDA if available, else CPU.
     """
+    _predict_risk_score = False
 
     def __init__(
             self,
@@ -79,13 +81,16 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
             activation=TunedCategorical(choices=['relu', 'selu']),
             dropout=TunedFloat(low=0.0, high=0.5),
             optimizer=TunedCategorical(choices=['sgd', 'adam']),
-            learning_rate=TunedFloat(low=1e-6, high=1e-2, log=True),
+            learning_rate=TunedFloat(low=1e-5, high=1e-2, log=True),
             momentum=TunedFloat(low=0.8, high=0.95),
             scheduler='inverse_time',
-            decay=TunedFloat(low=0.0, high=0.001),
+            decay=0.0,
             alpha=TunedFloat(low=0.0, high=1.0),
-            batch_size=128,
+            batch_size=256,
             n_epochs=500,
+            early_stopping=True,
+            patience=10,
+            validation_fraction=0.2,
             n_trials=50,
             random_state=None,
             device=None,
@@ -101,6 +106,9 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         self.alpha = alpha
         self.batch_size = batch_size
         self.n_epochs = n_epochs
+        self.early_stopping = early_stopping
+        self.patience = patience
+        self.validation_fraction = validation_fraction
         self.n_trials = n_trials
         self.random_state = random_state
         self.device = device
@@ -110,11 +118,12 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
     def _optimize(self, trial: optuna.Trial, X, y_event, y_time):
         # Do four-fold cross validation
         scores = []
-        for train_idx, test_idx in StratifiedKFold(n_splits=4).split(X, y_event.cpu()):
+        for train_idx, test_idx in (StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
+                .split(X, y_event.cpu())):
             model = self._train(trial, X[train_idx], y_event[train_idx], y_time[train_idx])
             model.eval()
             times = model(X[test_idx]).squeeze(dim=-1)
-            c_index = concordance_index(-times, y_event[test_idx], y_time[test_idx])
+            c_index = concordance_index(times, y_event[test_idx], y_time[test_idx], mode='time')
             scores.append(c_index)
         return sum(scores) / len(scores)
 
@@ -127,12 +136,26 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         optimizer, scheduler = sampler.sample_optimizer(model, self.optimizer, self.learning_rate, self.momentum,
                                                         self.scheduler, self.decay)
 
+        # Split into training and validation for early stopping
+        if self.early_stopping:
+            X, X_val, y_event, y_event_val, y_time, y_time_val = train_test_split(
+                X, y_event, y_time, test_size=self.validation_fraction, stratify=y_event.cpu(),
+                random_state=self.random_state)
+            early_stopper = EarlyStopper(patience=self.patience)
+
         # Extract data pair indices for ranking loss
         event_i, event_j = y_event.unsqueeze(-2), y_event.unsqueeze(-1)
         time_i, time_j = y_time.unsqueeze(-2), y_time.unsqueeze(-1)
         # The compatibility matrix specifies which pairs (i,j) can be compared accounting for censoring
         comp = event_i & (time_i < time_j)
         pairs = torch.nonzero(comp)  # of shape (n_pairs, 2)
+
+        if self.early_stopping:
+            # Same for validation data pair indices
+            event_i, event_j = y_event_val.unsqueeze(-2), y_event_val.unsqueeze(-1)
+            time_i, time_j = y_time_val.unsqueeze(-2), y_time_val.unsqueeze(-1)
+            comp = event_i & (time_i < time_j)
+            pairs_val = torch.nonzero(comp)  # of shape (n_pairs, 2)
 
         # Sample batch size and loss parameters
         batch_size = sampler.sample_int('batch_size', self.batch_size)
@@ -159,8 +182,30 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
                 loss = torch.mean(alpha * mse_loss + (1 - alpha) * rank_loss)
                 loss.backward()
                 optimizer.step()
-                if scheduler:
-                    scheduler.step()
+            if scheduler:
+                scheduler.step()
+            if self.early_stopping:
+                # Early stopping is a bit meaningless here due to the pairwise nature of the training
+                model.eval()
+                with torch.no_grad():
+                    val_loss = torch.tensor(0., device=self.device)
+                    for j in range(0, pairs_val.shape[0], batch_size):
+                        j_idx, i_idx = pairs_val[j:j + batch_size, 0], pairs_val[j:j + batch_size, 1]
+                        # mean squared error loss
+                        e_time_j = model(X_val[j_idx]).squeeze(-1)
+                        y_time_j = y_time_val[j_idx]
+                        mse_loss = torch.square(y_time_j - e_time_j) * (y_event_val[j_idx] | (e_time_j <= y_time_j))
+                        # ranking loss
+                        e_time_i = model(X_val[i_idx]).squeeze(-1)
+                        e_diff_ji = e_time_j - e_time_i
+                        y_diff_ji = y_time_j - y_time_val[i_idx]
+                        rank_loss = torch.square(torch.clamp(y_diff_ji - e_diff_ji, min=0))
+                        val_loss += torch.sum(alpha * mse_loss + (1 - alpha) * rank_loss)
+                    if early_stopper.should_stop(model, val_loss):
+                        break
+                model.train()
+        if self.early_stopping:
+            early_stopper.restore_best_weights(model)
         return model
 
     def fit(self, X, y):
@@ -190,7 +235,8 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         y_time = torch.as_tensor(y_time.copy(), dtype=torch.float32, device=self.device)
 
         # Seed PyTorch random number generator
-        if self.random_state is not None:
+        has_random_state = self.random_state is not None
+        if has_random_state:
             torch.manual_seed(self.random_state)
 
         # Normalize target time
@@ -200,11 +246,11 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         # Optimize hyperparameters using random solver
         optuna.logging.disable_default_handler()
         warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
-        with OptunaProgressCallback(model_name='DeepSurv', n_trials=50) as callback:
-            study = optuna.create_study(sampler=TPESampler(seed=self.random_state) if self.random_state else None,
+        with OptunaProgressCallback(model_name='RankDeepSurv', n_trials=self.n_trials) as callback:
+            study = optuna.create_study(sampler=TPESampler(seed=self.random_state) if has_random_state else None,
                                         direction='maximize')
             objective = functools.partial(self._optimize, X=X, y_event=y_event, y_time=y_time)
-            study.optimize(objective, n_trials=50, callbacks=[callback])
+            study.optimize(objective, n_trials=self.n_trials, callbacks=[callback])
 
         # Train final model with best hyperparameters
         self.model_ = self._train(study.best_trial, X, y_event, y_time)
@@ -212,8 +258,9 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
 
         # Override internal parameters with tuned hyperparameters
         best_params = study.best_params
-        best_params['hidden_layer_sizes'] = [best_params.pop('n_neurons_' + str(i + 1)) for i in
-                                             range(best_params.pop('n_layers'))]
+        if 'n_layers' in best_params:
+            best_params['hidden_layer_sizes'] = [best_params.pop('n_neurons_' + str(i + 1)) for i in
+                                                 range(best_params.pop('n_layers'))]
         self.set_params(**best_params)
 
         return self
@@ -291,6 +338,7 @@ class RankDeepSurv(SurvivalAnalysisMixin, BaseEstimator):
                                                   estimator.activation, estimator.dropout)
         estimator.model_.load_state_dict(state['model'])
         estimator.model_.to(device)
+        estimator.model_.eval()
         # Restore time horizon for predictions
         estimator.time_horizon_ = state['time_horizon']
         return estimator

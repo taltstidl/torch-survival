@@ -5,12 +5,13 @@ import optuna
 import torch
 from optuna.samplers import TPESampler
 from sklearn.base import BaseEstimator
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.utils.validation import check_is_fitted, validate_data
 from sksurv.base import SurvivalAnalysisMixin
 from sksurv.linear_model.coxph import BreslowEstimator
 from sksurv.util import check_array_survival
 
+from torch_survival.earlystop import EarlyStopper
 from torch_survival.losses import cox_neg_log_likelihood
 from torch_survival.metrics import concordance_index
 from torch_survival.progress import OptunaProgressCallback
@@ -46,13 +47,13 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         Dropout probability for the hidden layer.
     optimizer: {'sgd', 'adam'} or TunedCategorical, default=TunedCategorical(choices=['sgd', 'adam'])
         Optimizer used for weight optimization.
-    learning_rate: float or TunedFloat, default=TunedFloat(low=1e-7, high=1e-3, log=True)
+    learning_rate: float or TunedFloat, default=TunedFloat(low=1e-5, high=1e-2, log=True)
         Initial learning rate used when optimizing weights.
     momentum: float or TunedFloat, default=TunedFloat(low=0.8, high=0.95)
         Momentum or first moment vector
     scheduler: {'inverse_time'} or TunedCategorical, default='inverse_time'
         Scheduler used for weight updates.
-    decay: float or TunedFloat, default=TunedFloat(low=0.0, high=0.001)
+    decay: float or TunedFloat, default=0.0
         Decay used by scheduler when updating learning rate.
     n_epochs: int, default=500
         Number of training epochs (how many times each data point will be used).
@@ -71,11 +72,14 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
             activation=TunedCategorical(choices=['relu', 'selu']),
             dropout=TunedFloat(low=0.0, high=0.5),
             optimizer=TunedCategorical(choices=['sgd', 'adam']),
-            learning_rate=TunedFloat(low=1e-7, high=1e-3, log=True),
+            learning_rate=TunedFloat(low=1e-5, high=1e-2, log=True),
             momentum=TunedFloat(low=0.8, high=0.95),
             scheduler='inverse_time',
-            decay=TunedFloat(low=0.0, high=0.001),
+            decay=0.0,
             n_epochs=500,
+            early_stopping=True,
+            patience=10,
+            validation_fraction=0.2,
             n_trials=50,
             random_state=None,
             device=None,
@@ -89,6 +93,9 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         self.scheduler = scheduler
         self.decay = decay
         self.n_epochs = n_epochs
+        self.early_stopping = early_stopping
+        self.patience = patience
+        self.validation_fraction = validation_fraction
         self.n_trials = n_trials
         self.random_state = random_state
         self.device = device
@@ -98,13 +105,14 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
     def _optimize(self, trial: optuna.Trial, X, y_event, y_time):
         # Do 5-fold cross validation
         scores = []
-        for train_idx, test_idx in StratifiedKFold(n_splits=5).split(X, y_event.cpu()):
+        for train_idx, test_idx in (StratifiedKFold(n_splits=5, shuffle=True, random_state=self.random_state)
+                .split(X, y_event.cpu())):
             model = self._train(trial, X[train_idx], y_event[train_idx], y_time[train_idx])
             model.eval()
             risks = model(X[test_idx]).squeeze(dim=-1)
             c_index = concordance_index(risks, y_event[test_idx], y_time[test_idx])
             scores.append(c_index)
-        return - sum(scores) / len(scores)
+        return sum(scores) / len(scores)
 
     def _train(self, trial: optuna.Trial | None, X, y_event, y_time):
         sampler = OptunaSampler(trial)
@@ -115,11 +123,23 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         optimizer, scheduler = sampler.sample_optimizer(model, self.optimizer, self.learning_rate, self.momentum,
                                                         self.scheduler, self.decay)
 
+        # Split into training and validation for early stopping
+        if self.early_stopping:
+            X, X_val, y_event, y_event_val, y_time, y_time_val = train_test_split(
+                X, y_event, y_time, test_size=self.validation_fraction, stratify=y_event.cpu(),
+                random_state=self.random_state)
+            early_stopper = EarlyStopper(patience=self.patience)
+
         # Pre-sort dataset based on time
         sort_idx = torch.argsort(y_time, descending=True)
         X = X[sort_idx]
         y_event = y_event[sort_idx]
         y_time = y_time[sort_idx]
+        if self.early_stopping:
+            sort_idx = torch.argsort(y_time_val, descending=True)
+            X_val = X_val[sort_idx]
+            y_event_val = y_event_val[sort_idx]
+            y_time_val = y_time_val[sort_idx]
 
         # Train and return model
         model.to(self.device)
@@ -131,6 +151,16 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
             optimizer.step()
             if scheduler:
                 scheduler.step()
+            if self.early_stopping:
+                model.eval()
+                with torch.no_grad():
+                    risks = model(X_val).squeeze(dim=-1)
+                    loss = cox_neg_log_likelihood(risks, y_event_val, y_time_val, sort=False)
+                    if early_stopper.should_stop(model, loss):
+                        break
+                model.train()
+        if self.early_stopping:
+            early_stopper.restore_best_weights(model)
         return model
 
     def fit(self, X, y):
@@ -160,16 +190,18 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         y_time = torch.as_tensor(y_time.copy(), dtype=torch.float32, device=self.device)
 
         # Seed PyTorch random number generator
-        if self.random_state is not None:
+        has_random_state = self.random_state is not None
+        if has_random_state:
             torch.manual_seed(self.random_state)
 
         # Optimize hyperparameters
         optuna.logging.disable_default_handler()
         warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
-        with OptunaProgressCallback(model_name='DeepSurv', n_trials=50) as callback:
-            study = optuna.create_study(sampler=TPESampler(seed=self.random_state) if self.random_state else None)
+        with OptunaProgressCallback(model_name='DeepSurv', n_trials=self.n_trials) as callback:
+            study = optuna.create_study(sampler=TPESampler(seed=self.random_state) if has_random_state else None,
+                                        direction='maximize')
             objective = functools.partial(self._optimize, X=X, y_event=y_event, y_time=y_time)
-            study.optimize(objective, n_trials=50, callbacks=[callback])
+            study.optimize(objective, n_trials=self.n_trials, callbacks=[callback])
 
         # Train final model with best hyperparameters
         self.model_ = self._train(study.best_trial, X, y_event, y_time)
@@ -177,8 +209,9 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
 
         # Override internal parameters with tuned hyperparameters
         best_params = study.best_params
-        best_params['hidden_layer_sizes'] = [best_params.pop('n_neurons_' + str(i + 1)) for i in
-                                             range(best_params.pop('n_layers'))]
+        if 'n_layers' in best_params:
+            best_params['hidden_layer_sizes'] = [best_params.pop('n_neurons_' + str(i + 1)) for i in
+                                                 range(best_params.pop('n_layers'))]
         self.set_params(**best_params)
 
         # Fit baseline risk estimator using Breslow
@@ -317,6 +350,7 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
                                                   estimator.activation, estimator.dropout)
         estimator.model_.load_state_dict(state['model'])
         estimator.model_.to(device)
+        estimator.model_.eval()
         # Restore internal baseline risk estimator using Breslow
         estimator.baseline_ = state['baseline']
         return estimator
