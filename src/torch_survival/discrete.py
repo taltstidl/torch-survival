@@ -4,8 +4,9 @@ import torch
 
 
 def linear_time_points(time: torch.Tensor, n_times: int):
-    t_max = torch.max(time).item()
-    return torch.linspace(0, t_max, steps=n_times)
+    """ Linear time points. """
+    t_max, _ = time.max(dim=-1, keepdim=True)
+    return torch.linspace(0, 1, steps=n_times, device=t_max.device) * t_max
 
 
 def time_to_idx(event: torch.Tensor, time: torch.Tensor, time_points: torch.Tensor,

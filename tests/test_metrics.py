@@ -60,7 +60,7 @@ class AntoliniUnitTest(unittest.TestCase):
         # Verify that pycox and our implementation match
         for i in range(8):
             # pycox implementation
-            surv_df = pd.DataFrame(estimate[i].numpy().T, index=time_points.numpy())
+            surv_df = pd.DataFrame(estimate[i].numpy().T, index=time_points[i].numpy())
             ev = EvalSurv(surv_df, time[i].numpy(), event[i].numpy(), censor_surv='km')
             metric_pycox = ev.concordance_td(method='antolini')
             # Equality check

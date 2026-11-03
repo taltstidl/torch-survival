@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def cox_neg_log_likelihood(risk: torch.Tensor, event: torch.Tensor, time: torch.Tensor,
@@ -165,44 +166,49 @@ def mse_with_pairwise_rank(estimate: torch.Tensor, event: torch.Tensor, time: to
     return loss1 + loss2
 
 
-def discrete_with_pairwise_rank(estimate: torch.Tensor, event: torch.Tensor, time: torch.Tensor,
-                                alpha: float, sigma: float) -> torch.Tensor:
-    """ Discrete negative log likelihood and pairwise ranking loss.
+def deephit_loss(logits: torch.Tensor, event: torch.Tensor, time_idx: torch.Tensor,
+                 alpha: float, sigma: float) -> torch.Tensor:
+    """ DeepHit loss.
     From DeepHit: https://doi.org/10.1609/aaai.v32i1.11842
 
     Parameters
     ----------
-    estimate: torch.Tensor, of shape (..., n_samples, n_times)
-        Discrete time probabilities estimated by model
+    logits: torch.Tensor, of shape (..., n_samples, n_times)
+        Discrete time probabilities estimated by model, represented as logits
 
     event: torch.Tensor, of shape (..., n_samples)
         Event indicator denoting whether time is of observed event or dropout
 
-    time: torch.Tensor, of shape (..., n_samples)
-        Time of either observed event or dropout
+    time_idx: torch.Tensor, of shape (..., n_samples)
+        Discrete time indices of either observed event or dropout
 
     alpha: float
-        Weight for the ranking loss component
+        Weight for balancing the likelihood and ranking loss components
 
     sigma: float
         Bandwidth of the radial basis function in the ranking loss component
     """
-    cum_incidence = torch.cumsum(estimate, dim=-1)
-    estimate_t = torch.gather(estimate, dim=-1, index=time.unsqueeze(-1)).squeeze(-1)
-    cum_incidence_t = torch.gather(cum_incidence, dim=-1, index=time.unsqueeze(-1)).squeeze(-1)
-    eps = torch.exp(
-        torch.tensor(-100, device=estimate.device))  # -100 is also used in PyTorch's binary cross entropy as a cut-off
-    loss1 = (- torch.sum(event * torch.log(torch.clamp(estimate_t, min=eps)), dim=-1)
-             - torch.sum(~event * torch.log(torch.clamp(1 - cum_incidence_t, min=eps)), dim=-1))
+    # Add extra bin to the end for "out of bounds" survival times
+    logits = F.pad(logits, (0, 1), mode='constant')
+
+    # For events based on event probability
+    logits_t = logits.movedim(-1, 1) if logits.ndim > 2 else logits
+    loss_event = F.cross_entropy(logits_t, time_idx, reduction='none')
+    # For censoring based on survival probability
+    cdf = torch.softmax(logits, dim=-1).cumsum(dim=-1)
+    cdf_t = cdf.gather(dim=-1, index=time_idx.unsqueeze(-1)).squeeze(-1)
+    loss_censored = -torch.log(torch.clamp(1.0 - cdf_t, min=1e-7))
+
+    nll_loss = torch.where(event.bool(), loss_event, loss_censored).mean(dim=-1)
 
     # Here, we add extra dimensions to enable pairwise comparisons of (i,j)
     event_i, event_j = event.unsqueeze(-2), event.unsqueeze(-1)
-    time_i, time_j = time.unsqueeze(-2), time.unsqueeze(-1)
+    time_idx_i, time_idx_j = time_idx.unsqueeze(-2), time_idx.unsqueeze(-1)
     # The acceptability matrix specifies which (i, j) can be compared
-    acc = event_i & (time_i < time_j)
+    acc = event_i & ((time_idx_i < time_idx_j) | ((time_idx_i == time_idx_j) & ~event_j))
 
-    cum_incidence_ti = cum_incidence_t.unsqueeze(-2)
-    cum_incidence_tij = cum_incidence[:, time]
-    loss2 = torch.sum(torch.exp(-(cum_incidence_ti - cum_incidence_tij) / sigma) * acc, dim=(-2, -1))
+    cum_incidence_ti = cdf_t.unsqueeze(-2)
+    cum_incidence_tij = cdf.gather(dim=-1, index=time_idx_i.expand(*cdf.shape[:-1], -1))
+    rank_loss = torch.mean(torch.exp(-(cum_incidence_ti - cum_incidence_tij) / sigma) * acc, dim=(-2, -1))
 
-    return loss1 + alpha * loss2
+    return alpha * nll_loss + (1.0 - alpha) * rank_loss
