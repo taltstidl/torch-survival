@@ -54,61 +54,23 @@ def weibull_neg_log_likelihood(params: torch.Tensor, event: torch.Tensor, time: 
         weight, shape, scale = None, params[..., -2], params[..., -1]
     elif params.shape[-1] % 3 == 0:
         n_dists = params.shape[-1] // 3
-        weight, shape, scale = params[..., 0:n_dists], params[..., n_dists:2 * n_dists], params[..., 2 * n_dists:]
+        weight, shape, scale = params[..., :n_dists], params[..., n_dists:2 * n_dists], params[..., 2 * n_dists:]
     else:
         raise ValueError('Unexpected number of Weibull parameters: ' + str(params.shape[-1]))
 
-    # Guard against time=0, where log(time) = -inf, since a * event_true = nan which is later disregarded in nansum
-    event_true = event & (time != 0)
-    event_false = ~event
-    time = torch.clamp(time, min=1e-4)
-
+    time = torch.clamp(time, min=1e-4)  # t = 0 handled by clamping only, no event masking
     if n_dists > 1:
         time = time.unsqueeze(-1)  # for proper broadcasting with mixture params
 
-    a = torch.log(shape) - torch.log(scale) + (shape - 1) * (torch.log(time) - torch.log(scale))
-    b = -torch.pow(torch.clamp(time / scale, max=1000), shape)
+    log_ratio = torch.log(time) - torch.log(scale)
+    a = torch.log(shape) - torch.log(scale) + (shape - 1) * log_ratio  # log hazard
+    b = -torch.exp(shape * log_ratio)  # log survival
     if n_dists == 1:
-        # Simplified equation for single distribution
-        return -(torch.nansum(a * event_true.float(), dim=-1) + torch.sum(b, dim=-1)) / event.shape[-1]
+        ll = torch.where(event, a + b, b)
     else:
-        # Extended equation for multiple distributions
-        b += weight
-        return -(torch.nansum(torch.logsumexp(a + b, dim=-1) * event_true.float(), dim=-1)
-                 + torch.sum(torch.logsumexp(b, dim=-1) * event_false.float(), dim=-1)
-                 - torch.sum(torch.logsumexp(weight, dim=-1), dim=-1)) / event.shape[-1]
-
-
-def weibull_neg_log_likelihood_original(params: torch.Tensor, event: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
-    """ Weibull negative log likelihood.
-    From DeepWeiSurv: https://doi.org/10.1007/978-3-030-47426-3_53
-
-    Parameters
-    ----------
-    params: torch.Tensor, of shape (..., n_samples, 2 | p * 3)
-        Parameters of the mixture of p Weibull distributions, namely weights, shapes, and scales
-
-    event: torch.Tensor, of shape (..., n_samples)
-        Event indicator denoting whether time is of observed event or dropout
-
-    time: torch.Tensor, of shape (..., n_samples)
-        Time of either observed event or dropout
-    """
-    # Extract mixture alpha, shape, and scale from params
-    if params.shape[-1] % 3 == 0:
-        n_dists = params.shape[-1] // 3
-        alphas, shape, scale = params[..., 0:n_dists], params[..., n_dists:2 * n_dists], params[..., 2 * n_dists:]
-        alphas, shape, scale = alphas.t(), shape.t(), scale.t()
-    else:
-        raise ValueError('Unexpected number of Weibull parameters: ' + str(params.shape[-1]))
-
-    # https://github.com/AchrafB2015/pydpwte/blob/133aeb1004adf6bc0fd1e6985b42fc5986a77e02/pydpwte/utils/loss.py#L37-L44
-    t_over_eta = torch.div(time, scale)
-    h1 = torch.exp(-torch.pow(t_over_eta, shape))
-    h1_bis = torch.pow(t_over_eta, shape - 1)
-    params_aux = torch.div(torch.mul(alphas, shape), scale)
-    return -torch.mean(event * torch.log(torch.sum(torch.mul(torch.mul(params_aux, h1_bis), h1), 0))
-                       + (~event) * torch.log(torch.sum(alphas * h1, 0)))
+        log_w = torch.log_softmax(weight, dim=-1)
+        ll = torch.where(event, torch.logsumexp(log_w + a + b, dim=-1), torch.logsumexp(log_w + b, dim=-1))
+    return -ll.mean(dim=-1)
 
 
 def weibull_survival_time(params: torch.Tensor, softmax: bool = True):
