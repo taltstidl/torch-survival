@@ -182,12 +182,12 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
         """
         # Validate and extract data
         X, y = validate_data(self, X, y)
-        y_event, y_time = check_array_survival(X, y)
+        y_event_npy, y_time_npy = check_array_survival(X, y)
 
         # Convert data to tensors
         X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
-        y_event = torch.as_tensor(y_event, dtype=torch.bool, device=self.device)
-        y_time = torch.as_tensor(y_time.copy(), dtype=torch.float32, device=self.device)
+        y_event = torch.as_tensor(y_event_npy, dtype=torch.bool, device=self.device)
+        y_time = torch.as_tensor(y_time_npy.copy(), dtype=torch.float32, device=self.device)
 
         # Seed PyTorch random number generator
         has_random_state = self.random_state is not None
@@ -216,9 +216,18 @@ class DeepSurv(SurvivalAnalysisMixin, BaseEstimator):
 
         # Fit baseline risk estimator using Breslow
         risk_scores = self.model_(X).detach().squeeze(dim=-1).cpu().numpy()
-        self.baseline_ = BreslowEstimator().fit(risk_scores, y_event.cpu().numpy(), y_time.cpu().numpy())
+        self.baseline_ = BreslowEstimator().fit(risk_scores, y_event_npy, y_time_npy)
 
         return self
+
+    def patch_baseline(self, X, y):
+        """ Make sure y_time remains float64 rather than float32. """
+        X, y = validate_data(self, X, y)
+        y_event, y_time = check_array_survival(X, y)
+        X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
+
+        risk_scores = self.model_(X).detach().squeeze(dim=-1).cpu().numpy()
+        self.baseline_ = BreslowEstimator().fit(risk_scores, y_event, y_time)
 
     @torch.no_grad()
     def predict(self, X):

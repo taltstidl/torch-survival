@@ -233,10 +233,10 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         if return_array:
             return cum_hazard
         n_samples = X.shape[0]
-        x = self.time_points_.cpu().numpy()
+        x = np.append(self.time_points_.cpu().numpy(), np.inf)
         funcs = np.empty(n_samples, dtype=object)
         for i in range(n_samples):
-            funcs[i] = StepFunction(x=x, y=cum_hazard[i])
+            funcs[i] = StepFunction(x=x, y=np.append(cum_hazard[i], np.inf))
         return funcs
 
     @torch.no_grad()
@@ -267,10 +267,10 @@ class DeepHit(SurvivalAnalysisMixin, BaseEstimator):
         if return_array:
             return surv_prob  # just the survival probabilities at the discrete time points
         n_samples = X.shape[0]
-        x = self.time_points_.cpu().numpy()
+        x = np.append(self.time_points_.cpu().numpy(), np.inf)
         funcs = np.empty(n_samples, dtype=object)
         for i in range(n_samples):
-            funcs[i] = StepFunction(x=x, y=surv_prob[i])
+            funcs[i] = StepFunction(x=x, y=np.append(surv_prob[i], 0.0))
         return funcs
 
     def save(self, path):
